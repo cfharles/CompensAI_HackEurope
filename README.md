@@ -1,158 +1,154 @@
-## Devpost
-https://devpost.com/software/compensai-choakb
+# CompensAI
 
-# CompensAI Backend (FastAPI + Supabase)
+CompensAI is a HackEurope project that automates compensation claims from inbound emails while keeping a human approval checkpoint before submission.
 
-Hackathon backend scaffolding for a 3‑agent compensation pipeline:
-- **Agent 1 (n8n + Gmail):** scans inbox → extracts “intake” JSON → calls backend.
-- **Agent 2 (FastAPI):** eligibility + draft generation → writes to Supabase.
-- **Agent 3 (FastAPI, mandatory):** billing artifacts after resolution (event + optional Stripe link).
-- **UI (Lovable):** reads from Supabase directly (realtime) and calls backend only for approval/reprocess.
+[DevPost](https://devpost.com/software/compensai-choakb)  
+[Lovable Dashboard](https://github.com/yauhenifutryn/dispute-defender-dash)
+[Demo Airline/Retail Sites](https://skill-deploy-x4cr0r1eo8-codex-agent-deploys.vercel.app/index.html)
 
-Supabase (`public.cases`, `public.case_events`) is the shared state + event log; the backend is an orchestrator/writer.
+## Why we built it
 
-## Architecture recommendation
-- **Communication:** HTTP webhooks between n8n and FastAPI; Supabase is the source of truth.
-- **State:** one row per case in `public.cases` (current snapshot), append‑only timeline in `public.case_events`.
-- **Realtime UI:** Lovable subscribes to `cases` and `case_events` changes (Supabase realtime) to update dashboards + timelines.
-- **Agent 2 logic:** Claude-first extraction/decision with deterministic fallback; supports flights + marketplace + trains and can fetch demo policy/form/contact pages (no Playwright submission in V1).
+People miss legitimate compensation because claim workflows are fragmented and tedious: finding the right contact path, extracting evidence, mapping legal/policy context, drafting a claim, and chasing replies.
 
-## Endpoints (implemented)
+CompensAI focuses on a proactive workflow:
+- monitor new inbound emails,
+- detect claim-worthy incidents,
+- generate a draft with estimated value,
+- require one-click user approval before submission,
+- track outcomes in an auditable timeline.
+
+Privacy model (MVP): monitor incoming emails going forward; process older cases only when users explicitly forward those emails.
+
+## What it does
+
+- Detects potential claims in inbound emails (flight delay/cancellation/baggage, parcel delivery issues, train disruptions).
+- Converts unstructured email text into a structured case.
+- Enriches decisioning with rule/context knowledge.
+- Produces a deterministic claim draft (email or form-oriented draft).
+- Stops at a human-in-the-loop approval gate before sending.
+- Tracks vendor responses and state transitions until resolution.
+- Writes append-only `case_events` for explainability/debugging.
+
+## Hackathon architecture
+
+1. Agent 1 (`n8n + Gmail`) watches inboxes and forwards payloads to FastAPI.
+2. Agent 2 (`FastAPI + Claude + fallback logic`) classifies, extracts, and drafts.
+3. Agent 3 (`FastAPI billing step`) stores resolution + fee data when a case is resolved.
+4. Dashboard (`Lovable + Supabase realtime`) reads `cases` and `case_events` directly.
+
+Supabase is the system of record:
+- `public.cases`: current case snapshot.
+- `public.case_events`: append-only timeline.
+
+## Demo setup used in the hackathon
+
+- Monitored client inbox: `client.compensai@gmail.com`
+- Simulated vendor inbox: `everydayaionx@gmail.com`
+- Billing in MVP: financial data is generated/stored for dashboard usage; full payment collection automation is future work.
+
+## API (implemented)
+
 Base URL: `http://localhost:8000`
 
-### `POST /emails/ingest` (Agent 1 → Backend, triage-first)
-Use this endpoint if n8n is sending *all* emails and you want the backend to decide **trash vs candidate**.
-Only candidates create a case and trigger Agent2.
+- `GET /health`  
+  Health check.
 
-### `POST /cases/intake` (Agent 1 → Backend)
-Optional auth header (recommended for server‑to‑server): `X-CompensAI-Webhook-Secret`
+- `POST /emails/ingest`  
+  Triage-first entrypoint. Accepts all emails, classifies `trash` vs `candidate`, only creates cases for candidates.
 
-Request JSON:
-```json
-{
-  "source": "gmail",
-  "message_id": "18c4...",
-  "thread_id": "18c4...",
-  "from_email": "support@vendor.com",
-  "to_email": "you@gmail.com",
-  "email_subject": "Your flight was delayed",
-  "email_body": "…full text…",
-  "vendor": "Ryanair",
-  "category": "flight_delay",
-  "incident_date": "2025-01-14",
-  "flight_number": "FR123",
-  "booking_reference": "ABCDEF",
-  "estimated_value": 250,
-  "extracted_fields": { "delay_hours": 4 }
-}
-```
+- `POST /cases/intake`  
+  Direct case intake path (skips triage gate, still runs Agent 2 processing).
 
-Response JSON:
-```json
-{
-  "id": "case-uuid",
-  "status": "awaiting_approval",
-  "existing": false,
-  "case": { "...full cases row..." }
-}
-```
+- `POST /cases/{case_id}/approve`  
+  Approves a draft and optionally sends it via configured Agent 1 webhook.
 
-Writes:
-- `cases`: inserts baseline email context + sets `status=processing`, then runs Agent 2 and updates fields.
-- `case_events`: `email_scanned` (agent1), then `draft_generated` + `awaiting_approval` (agent2).
+- `POST /cases/{case_id}/vendor_response`  
+  Records vendor outcome and, if resolved, triggers billing updates/events.
 
-### `POST /cases/{id}/approve` (UI → Backend → Agent 1)
-Optional auth header: `X-CompensAI-Admin-Key` (not safe for browser apps; hackathon-only)
+- `POST /cases/{case_id}/run_agent2`  
+  Re-runs Agent 2 on an existing case.
 
-Request JSON:
-```json
-{ "approved_by": "rita", "notes": "ok to send", "send_via": "email", "dry_run": false }
-```
+- `GET /cases/email-drafts/pending`  
+  Returns drafts currently awaiting approval.
 
-Behavior:
-- Calls `AGENT1_SEND_WEBHOOK_URL` (n8n) with the draft email/form payload (unless `dry_run=true`).
-- Updates `cases.status=submitted_to_vendor`
-- Inserts `case_events.submitted_to_vendor`
+- `POST /cases/email-drafts/{case_id}/mark-sent`  
+  Marks approved draft as submitted.
 
-### `POST /cases/{id}/vendor_response` (Agent 1 → Backend)
-Optional auth header (recommended): `X-CompensAI-Webhook-Secret`
+Auth headers (enabled when configured):
+- `X-CompensAI-Webhook-Secret` for n8n/webhook endpoints.
+- `X-CompensAI-Admin-Key` for admin endpoints.
 
-Request JSON:
-```json
-{
-  "outcome": "accepted",
-  "resolved": true,
-  "recovered_amount": 250,
-  "currency": "eur",
-  "evidence": { "vendor_ref": "XYZ" },
-  "message_id": "18c4...",
-  "thread_id": "18c4..."
-}
-```
+## Case lifecycle
 
-Behavior:
-- Updates `cases.status` and stores vendor response under `cases.decision_json.vendor_response`
-- Inserts `case_events.vendor_replied`
-- If resolved → runs Agent 3 billing and inserts `case_events.resolved` + `case_events.billing_created`
+Common statuses:
+- `processing`
+- `awaiting_approval`
+- `submitted_to_vendor`
+- `vendor_replied`
+- `needs_info`
+- `rejected`
+- `resolved`
 
-### `POST /cases/{id}/run_agent2` (optional manual reprocess)
-Optional auth header: `X-CompensAI-Admin-Key`
+If classification ends in unknown/unsupported category, the case can be removed from active dashboard flow in this MVP.
 
-Behavior: re-runs Agent 2 on the current `cases` row and appends events.
+## Tech stack
 
-## DB fields UI can rely on
-- **Case list:** `id, vendor, category, estimated_value, status, updated_at`
-- **Case detail:** `email_subject, email_body, from_email, to_email, decision_json, draft_email_* , form_data`
-- **Timeline:** `case_events` ordered by `created_at`
-- **Economics (hackathon):**
-  - On resolution, we reuse `cases.estimated_value` as the known recovered amount (if provided).
-  - Canonical billing payload is stored in `cases.decision_json.billing` and the `billing_created` event `details`.
+- FastAPI (Python backend)
+- n8n + Gmail (email watch/send orchestration)
+- Supabase (state + event log + realtime)
+- Claude (LLM extraction/drafting with deterministic fallback)
+- Lovable (dashboard)
+- ReportLab (PDF generation for form-style drafts)
 
-## Minimal folder structure
+## Repository structure
+
 ```text
 app/
   main.py
-  core/
-    config.py
-    security.py
-  db/
-    supabase.py
-  repositories/
-    cases.py
-  routers/
-    cases.py
-  services/
-    agent2.py
-    billing.py
-requirements.txt
-.env.example
+  core/         # settings + auth header checks
+  db/           # lightweight Supabase REST client
+  repositories/ # case/event persistence helpers
+  routers/      # API endpoints
+  services/     # triage, agent2, billing, company-site helpers
+  kb/           # rule knowledge (EU261, train)
+examples/       # sample intake payloads
 ```
 
-## Local run
+## Local development
+
+### 1) Install
+
 ```bash
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+```
+
+### 2) Configure environment
+
+Create `.env` in the repo root:
+
+```env
+SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+
+# Optional
+N8N_WEBHOOK_SECRET=...
+ADMIN_API_KEY=...
+AGENT1_SEND_WEBHOOK_URL=...
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+ANTHROPIC_TIMEOUT_SECONDS=30
+CORS_ORIGINS=http://localhost:3000
+```
+
+### 3) Run API
+
+```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-## Env vars (minimum)
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY` (server-side only)
-
-Optional:
-- `N8N_WEBHOOK_SECRET` (enables `X-CompensAI-Webhook-Secret` checks)
-- `AGENT1_SEND_WEBHOOK_URL` (approve → n8n send webhook)
-- `ANTHROPIC_API_KEY` (Claude for Agent 2)
-- `ANTHROPIC_MODEL` (default `claude-haiku-4-5-20251001`)
-- `ANTHROPIC_TIMEOUT_SECONDS` (default `30`)
-- `STRIPE_SECRET_KEY`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`
-- `SUCCESS_FEE_RATE` (default `0.2`)
-- `CORS_ORIGINS` (comma-separated)
-
-## Quick test with Ryanair delay mock
-Run backend first, then post the example payload:
+## Quick test payloads
 
 ```bash
 curl -X POST http://localhost:8000/cases/intake \
@@ -160,7 +156,7 @@ curl -X POST http://localhost:8000/cases/intake \
   --data @examples/intake_ryanair_delay.json
 ```
 
-If `N8N_WEBHOOK_SECRET` is configured, also include:
+If webhook secret is enabled:
 
 ```bash
 curl -X POST http://localhost:8000/cases/intake \
@@ -169,46 +165,42 @@ curl -X POST http://localhost:8000/cases/intake \
   --data @examples/intake_ryanair_delay.json
 ```
 
-Expected behavior:
-- A new row appears in `public.cases` with extraction, eligibility, draft, and form fields populated.
-- Timeline rows appear in `public.case_events` (`email_scanned`, `draft_generated`, `awaiting_approval`).
-- If Claude is unavailable, the case is still processed via deterministic fallback and saved.
+Other example payloads:
+- `examples/intake_flight_cancellation.json`
+- `examples/intake_delivery_late.json`
 
-## Quick tests (other domains)
-Airline cancellation (includes demo airline URLs in body):
-```bash
-curl -X POST http://localhost:8000/cases/intake \
-  -H "Content-Type: application/json" \
-  --data @examples/intake_flight_cancellation.json
-```
-
-Marketplace late delivery (vendor forced to `DemoRetail`; includes demo retail policy/contact URLs in body):
-```bash
-curl -X POST http://localhost:8000/cases/intake \
-  -H "Content-Type: application/json" \
-  --data @examples/intake_delivery_late.json
-```
-
-## Supabase verification SQL
-Use Supabase SQL editor:
+## Supabase verification queries
 
 ```sql
-select id, vendor, category, eligibility_result, estimated_value, status, updated_at
+select id, vendor, category, estimated_value, status, updated_at
 from public.cases
 order by updated_at desc
-limit 10;
+limit 20;
 ```
 
 ```sql
 select case_id, actor, event_type, details, created_at
 from public.case_events
 order by created_at desc
-limit 20;
+limit 50;
 ```
-# Other parts of the project
 
-## Lovable UI
-https://github.com/yauhenifutryn/dispute-defender-dash
+## Challenges and lessons
 
-## Demo websites for the company (airline and marketplace)
-https://skill-deploy-x4cr0r1eo8-codex-agent-deploys.vercel.app/index.html airline and amazon demo webstes
+- Reply monitoring and thread correlation are orchestration-heavy; deterministic state transitions matter.
+- Idempotency/dedup are critical when ingesting from watch-based workflows.
+- Event sourcing (`case_events`) made debugging and explainability much easier.
+- Human approval is a safety primitive in legal/financial automation.
+
+## What’s next
+
+- Production-grade user inbox integration, tenant isolation, and hardened auth/RLS.
+- Vendor-specific submission connectors (Ryanair/Amazon/etc.) with robust retryable automation.
+- Rejection mitigation + escalation packs.
+- SLA-based follow-ups.
+- Draft revision loop from user comments.
+- Expanded billing flows (invoice delivery, reminders, collection automation).
+
+## Built with
+
+`claude` `codex` `cursor` `fastapi` `github` `javascript` `lovable` `n8n` `python` `sql` `stripe` `supabase`
