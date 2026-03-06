@@ -1,206 +1,131 @@
 # CompensAI
 
-CompensAI is a HackEurope project that automates compensation claims from inbound emails while keeping a human approval checkpoint before submission.
+CompensAI is an autonomous AI agent that monitors your Gmail inbox, detects compensation cases (flight delays, lost luggage, damaged parcels), checks your eligibility under EU law, drafts a formal claim, and submits it to the vendor on your behalf. You review and approve once — the rest is handled automatically.
 
-[DevPost](https://devpost.com/software/compensai-choakb)  
-[Lovable Dashboard](https://github.com/yauhenifutryn/dispute-defender-dash)
-[Demo Airline/Retail Sites](https://skill-deploy-x4cr0r1eo8-codex-agent-deploys.vercel.app/index.html)
+🔗 [Devpost](https://devpost.com/software/compensai-choakb)
 
-## Why we built it
+## Demo
 
-People miss legitimate compensation because claim workflows are fragmented and tedious: finding the right contact path, extracting evidence, mapping legal/policy context, drafting a claim, and chasing replies.
+> Click the thumbnail to watch the demo
 
-CompensAI focuses on a proactive workflow:
-- monitor new inbound emails,
-- detect claim-worthy incidents,
-- generate a draft with estimated value,
-- require one-click user approval before submission,
-- track outcomes in an auditable timeline.
+[![Click to watch the CompensAI demo](https://img.youtube.com/vi/bpe9bpeoYO0/maxresdefault.jpg)](https://www.youtube.com/watch?v=bpe9bpeoYO0)
 
-Privacy model (MVP): monitor incoming emails going forward; process older cases only when users explicitly forward those emails.
+## Architecture
 
-## What it does
-
-- Detects potential claims in inbound emails (flight delay/cancellation/baggage, parcel delivery issues, train disruptions).
-- Converts unstructured email text into a structured case.
-- Enriches decisioning with rule/context knowledge.
-- Produces a deterministic claim draft (email or form-oriented draft).
-- Stops at a human-in-the-loop approval gate before sending.
-- Tracks vendor responses and state transitions until resolution.
-- Writes append-only `case_events` for explainability/debugging.
-
-## Hackathon architecture
-
-1. Agent 1 (`n8n + Gmail`) watches inboxes and forwards payloads to FastAPI.
-2. Agent 2 (`FastAPI + Claude + fallback logic`) classifies, extracts, and drafts.
-3. Agent 3 (`FastAPI billing step`) stores resolution + fee data when a case is resolved.
-4. Dashboard (`Lovable + Supabase realtime`) reads `cases` and `case_events` directly.
-
-Supabase is the system of record:
-- `public.cases`: current case snapshot.
-- `public.case_events`: append-only timeline.
-
-## Demo setup used in the hackathon
-
-- Monitored client inbox: `client.compensai@gmail.com`
-- Simulated vendor inbox: `everydayaionx@gmail.com`
-- Billing in MVP: financial data is generated/stored for dashboard usage; full payment collection automation is future work.
-
-## API (implemented)
-
-Base URL: `http://localhost:8000`
-
-- `GET /health`  
-  Health check.
-
-- `POST /emails/ingest`  
-  Triage-first entrypoint. Accepts all emails, classifies `trash` vs `candidate`, only creates cases for candidates.
-
-- `POST /cases/intake`  
-  Direct case intake path (skips triage gate, still runs Agent 2 processing).
-
-- `POST /cases/{case_id}/approve`  
-  Approves a draft and optionally sends it via configured Agent 1 webhook.
-
-- `POST /cases/{case_id}/vendor_response`  
-  Records vendor outcome and, if resolved, triggers billing updates/events.
-
-- `POST /cases/{case_id}/run_agent2`  
-  Re-runs Agent 2 on an existing case.
-
-- `GET /cases/email-drafts/pending`  
-  Returns drafts currently awaiting approval.
-
-- `POST /cases/email-drafts/{case_id}/mark-sent`  
-  Marks approved draft as submitted.
-
-Auth headers (enabled when configured):
-- `X-CompensAI-Webhook-Secret` for n8n/webhook endpoints.
-- `X-CompensAI-Admin-Key` for admin endpoints.
-
-## Case lifecycle
-
-Common statuses:
-- `processing`
-- `awaiting_approval`
-- `submitted_to_vendor`
-- `vendor_replied`
-- `needs_info`
-- `rejected`
-- `resolved`
-
-If classification ends in unknown/unsupported category, the case can be removed from active dashboard flow in this MVP.
-
-## Tech stack
-
-- FastAPI (Python backend)
-- n8n + Gmail (email watch/send orchestration)
-- Supabase (state + event log + realtime)
-- Claude (LLM extraction/drafting with deterministic fallback)
-- Lovable (dashboard)
-- ReportLab (PDF generation for form-style drafts)
-
-## Repository structure
-
-```text
-app/
-  main.py
-  core/         # settings + auth header checks
-  db/           # lightweight Supabase REST client
-  repositories/ # case/event persistence helpers
-  routers/      # API endpoints
-  services/     # triage, agent2, billing, company-site helpers
-  kb/           # rule knowledge (EU261, train)
-examples/       # sample intake payloads
+```mermaid
+flowchart TD
+    A[Gmail Inbox] -->|OAuth scan| B[Agent 1 - Email Scanner]
+    B -->|POST /cases/intake| C[FastAPI Backend]
+    C -->|Claude Haiku| D[Agent 2 - Eligibility Check + Draft]
+    D --> E[(Supabase)]
+    E --> F[React Dashboard - Human Review]
+    F -->|Approve / Edit| G[POST /cases/id/approve]
+    G --> H{Claim type}
+    H -->|Portal form| I[Agent 3 - Playwright Form Fill]
+    H -->|Email claim| J[Agent 3 - Gmail Send]
+    I --> K[Billing · Stripe]
+    J --> K
 ```
 
-## Local development
+## Project Structure
 
-### 1) Install
+```
+compensation-agent/
+├── backend/
+│   ├── app/
+│   │   ├── core/           # config, security
+│   │   ├── db/             # Supabase client
+│   │   ├── repositories/   # DB queries
+│   │   ├── routers/        # API endpoints (cases, gmail)
+│   │   └── services/       # agent2 (LLM), form_filler, billing
+│   ├── scripts/
+│   │   └── gmail_auth.py   # one-time Gmail OAuth setup
+│   └── requirements.txt
+└── frontend/
+    └── src/
+        ├── pages/          # Dashboard, DisputeDetail, Landing
+        └── components/     # HITLActionBlock, AgentTimeline, etc.
+```
+
+## How it works
+
+1. **Agent 1 — Scan:** Reads your Gmail inbox and identifies emails that may contain a compensation case (flight delay, lost luggage, damaged parcel, overcharge)
+2. **Agent 2 — Analyse:** Claude checks eligibility against EU261/2004 and the Montreal Convention, estimates the claim value, and drafts a formal claim email or fills the vendor's web form
+3. **You — Review:** A dashboard shows you the AI's reasoning, the draft claim, and any pre-filled form fields. You can edit and approve or reject
+4. **Agent 3 — Submit:** Sends the email via Gmail or submits the vendor form headlessly via Playwright, records a video of the form being filled, calculates a 10% success fee, and generates a Stripe payment link
+
+## Features
+
+- **Inbox scanning:** Gmail OAuth integration, scans for flight delays, lost luggage, damaged parcels, and overcharges
+- **Eligibility analysis:** Claude Haiku checks the claim against EU regulations and vendor policies, with reasoning shown to the user
+- **Claim drafting:** Generates a formal compensation email or fills the vendor's web form with extracted case data
+- **Human-in-the-loop:** Dashboard to review, edit fields, approve, or reject — nothing is sent without your explicit approval
+- **Form recording:** Playwright records a video of the form being filled so you can verify what was submitted
+- **Billing:** 10% success fee calculated on approval, Stripe Checkout link generated automatically
+
+## Quick Start
+
+> This project connects to your own accounts. You will need to set up your own API keys — none are included in this repository.
+
+### Prerequisites
+
+| Service | What you need | Link |
+|---------|--------------|------|
+| **Supabase** | Free project + service role key | [supabase.com](https://supabase.com) |
+| **Anthropic** | API key | [console.anthropic.com](https://console.anthropic.com) |
+| **Google Cloud** | OAuth 2.0 client ID (Desktop app) + Gmail API enabled | [console.cloud.google.com](https://console.cloud.google.com) |
+| **Stripe** | Test secret key *(optional, for payment links only)* | [dashboard.stripe.com](https://dashboard.stripe.com) |
+
+### Backend
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+cd backend
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### 2) Configure environment
-
-Create `.env` in the repo root:
-
-```env
-SUPABASE_URL=...
-SUPABASE_SERVICE_ROLE_KEY=...
-
-# Optional
-N8N_WEBHOOK_SECRET=...
-ADMIN_API_KEY=...
-AGENT1_SEND_WEBHOOK_URL=...
-ANTHROPIC_API_KEY=...
-ANTHROPIC_MODEL=claude-haiku-4-5-20251001
-ANTHROPIC_TIMEOUT_SECONDS=30
-CORS_ORIGINS=http://localhost:3000
-```
-
-### 3) Run API
-
-```bash
+playwright install chromium
+cp .env.example .env            # fill in your keys
 uvicorn app.main:app --reload --port 8000
 ```
 
-## Quick test payloads
+### Gmail OAuth (one-time per Google account)
 
 ```bash
-curl -X POST http://localhost:8000/cases/intake \
-  -H "Content-Type: application/json" \
-  --data @examples/intake_ryanair_delay.json
+# 1. Download client_secret.json from Google Cloud Console
+#    APIs & Services → Credentials → OAuth 2.0 Client ID → Desktop App
+# 2. Place it in backend/
+# 3. Run:
+python scripts/gmail_auth.py
+# Opens a browser → sign in → gmail_token.json is saved automatically
 ```
 
-If webhook secret is enabled:
+### Frontend
 
 ```bash
-curl -X POST http://localhost:8000/cases/intake \
-  -H "Content-Type: application/json" \
-  -H "X-CompensAI-Webhook-Secret: <your-secret>" \
-  --data @examples/intake_ryanair_delay.json
+cd frontend
+npm install
+npm run dev                     # http://localhost:5173
 ```
 
-Other example payloads:
-- `examples/intake_flight_cancellation.json`
-- `examples/intake_delivery_late.json`
+## Environment Variables
 
-## Supabase verification queries
+Create `backend/.env`:
 
-```sql
-select id, vendor, category, estimated_value, status, updated_at
-from public.cases
-order by updated_at desc
-limit 20;
+```env
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...
+
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+
+ADMIN_API_KEY=your-secret
+
+GMAIL_CREDENTIALS_FILE=client_secret.json
+GMAIL_TOKEN_FILE=gmail_token.json
+
+STRIPE_SECRET_KEY=sk_test_...        # optional
+STRIPE_SUCCESS_URL=https://your-domain.com/success
+STRIPE_CANCEL_URL=https://your-domain.com/cancel
+
+CORS_ORIGINS=http://localhost:5173
 ```
-
-```sql
-select case_id, actor, event_type, details, created_at
-from public.case_events
-order by created_at desc
-limit 50;
-```
-
-## Challenges and lessons
-
-- Reply monitoring and thread correlation are orchestration-heavy; deterministic state transitions matter.
-- Idempotency/dedup are critical when ingesting from watch-based workflows.
-- Event sourcing (`case_events`) made debugging and explainability much easier.
-- Human approval is a safety primitive in legal/financial automation.
-
-## What’s next
-
-- Production-grade user inbox integration, tenant isolation, and hardened auth/RLS.
-- Vendor-specific submission connectors (Ryanair/Amazon/etc.) with robust retryable automation.
-- Rejection mitigation + escalation packs.
-- SLA-based follow-ups.
-- Draft revision loop from user comments.
-- Expanded billing flows (invoice delivery, reminders, collection automation).
-
-## Built with
-
-`claude` `codex` `cursor` `fastapi` `github` `javascript` `lovable` `n8n` `python` `sql` `stripe` `supabase`
